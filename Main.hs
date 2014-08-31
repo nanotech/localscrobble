@@ -55,17 +55,14 @@ main = do
 
     (\(st,msg) -> respond $ responseLBS st [] msg) =<<
       if path == submissionsPath then do
-        db <- openDB
-        withTransaction db $
+        withDB $ \db -> withTransaction db $
           mapM_ (insertScrobble db username) . catMaybes . takeWhile isJust $
             map (\idx -> lookupScrobble (<> "[" <> B.pack (show idx) <> "]") q)
             [(0 :: Int)..]
-        SQL.close db
         return (status200, "OK\n")
       else if path == nowPlayingPath then do
         let t = fromJustNote "read track" $ lookupTrack id q
-        db <- openDB
-        withTransaction db $
+        withDB $ \db -> withTransaction db $
           insertNowPlaying db username t
         return (status200, "OK\n")
       else return $ if wantsHandshake then
