@@ -226,8 +226,6 @@ insertScrobble db user s = do
   ui <- insertName db "user" user
   tri <- insertTrack db $ scrobbleTrack s
   insertValues db "scrobble" ["user_id", "track_id", "source", "rating", "timestamp"] (ui, tri, so, ra, ts)
-  --SQL.execute db "INSERT INTO scrobble (track_id, source, rating, timestamp) values (?, ?, ?, ?)" (tri, so, ra, ts)
-  --SQL.lastInsertRowId db
 
 insertTrack :: SQL.Connection -> Track -> IO RowID
 insertTrack db t = do
@@ -236,9 +234,6 @@ insertTrack db t = do
   bi <- Tr.sequence $ insertName db "album" <$> trackAlbum t
   mi <- Tr.sequence $ insertName db "musicbrainz" <$> trackMusicBrainzID t
   selectOrInsertValues db "track" ["title_id", "artist_id", "album_id", "musicbrainz_id", "length", "number"] (ti, ai, bi, mi, trackLength t, trackNumber t)
-  --SQL.fromOnly . head <$> SQL.query db "INSERT OR IGNORE INTO track (title_id, artist_id, album_id, musicbrainz_id, length, number) values (?, ?, ?, ?, ?, ?)" (ti, ai, bi, mi, trackLength t, trackNumber t)
-  --xs <- SQL.query db "SELECT track.id FROM track JOIN artist ON artist_id = artist.id JOIN title ON title_id = title.id JOIN album ON album_id = album.id JOIN musicbrainz ON musicbrainz_id = musicbrainz.id WHERE artist.name = ? AND title.name = ? AND album.name = ? AND musicbrainz.name = ?" (trackArtist t, trackTitle t, trackAlbum t, trackMusicBrainzID t)
-  --print (xs :: [SQL.Only RowID])
 
 newtype TableName = TableName { unTableName :: Text }
   deriving (Show)
@@ -247,21 +242,6 @@ type ColumnName = TableName
 
 instance IsString TableName where
   fromString = TableName . fromString
-
-{-
-getNameID :: SQL.Connection -> TableName -> Text -> IO (Maybe RowID)
-getNameID db (TableName t) n =
-  fmap SQL.fromOnly . listToMaybe <$> SQL.query db (SQL.Query $ "SELECT id FROM " <> t <> " WHERE name = ?") (SQL.Only n)
-
-insertName' :: SQL.Connection -> TableName -> Text -> IO RowID
-insertName' db tb@(TableName t) n = do
-  mni <- getNameID db tb n
-  case mni of
-    Nothing -> do
-      SQL.execute db (SQL.Query $ "INSERT INTO " <> t <> " (name) values (?)") (SQL.Only n)
-      SQL.lastInsertRowId db
-    Just ni -> return ni
--}
 
 insertName :: SQL.Connection -> TableName -> Text -> IO RowID
 insertName db t n = selectOrInsertValues db t ["name"] (SQL.Only n)
