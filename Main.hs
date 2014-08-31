@@ -2,12 +2,13 @@
 module Main (main) where
 
 import Control.Applicative
-import Control.Monad (join, void)
+import Control.Monad (join, void, when)
 import Control.Exception (bracket, bracketOnError)
 import Safe
 
 import qualified Network.Wai.Handler.Warp as Warp
 import Network.Wai
+import Network.Wai.Logger (ApacheLogger, withStdoutLogger)
 import Network.HTTP.Types
 
 import Data.Monoid ((<>))
@@ -32,44 +33,41 @@ main = do
   let port = 7123
   withDB setupDB
 
-  Warp.run port $ \req respond -> do
-    let baseURL = "http://localhost:" <> LB.pack (show port)
-    putStrLn "=============="
-    print $ requestMethod req
-    print $ httpVersion req
-    let path = rawPathInfo req
-    print path
-    print $ rawQueryString req
-    print $ requestHeaders req
-    print $ remoteHost req
-    print $ pathInfo req
-    body <- strictRequestBody req
-    let urlQuery = queryString req
-        wantsHandshake = ("hs", Just "true") `elem` urlQuery
-    print urlQuery
-    print body
+  let baseURL = "http://localhost:" <> LB.pack (show port)
+  withStdoutLogger $ \logger ->
+    Warp.run port (app baseURL logger)
 
-    let q = parseQuery $ LB.toStrict body
-        sessionID = fromJustNote "session id" $ queryGetText q "s"
-        username = sessionID
+app :: LB.ByteString -> ApacheLogger -> Application
+app baseURL logger req respond = do
+  let path = rawPathInfo req
+  body <- strictRequestBody req
+  let urlQuery = queryString req
+      wantsHandshake = ("hs", Just "true") `elem` urlQuery
 
-    (\(st,msg) -> respond $ responseLBS st [] msg) =<<
-      if path == submissionsPath then do
-        withDB $ \db -> withTransaction db $
-          mapM_ (insertScrobble db username) . catMaybes . takeWhile isJust $
-            map (\idx -> lookupScrobble (<> "[" <> B.pack (show idx) <> "]") q)
-            [(0 :: Int)..]
-        return (status200, "OK\n")
-      else if path == nowPlayingPath then do
-        let t = fromJustNote "read track" $ lookupTrack id q
-        withDB $ \db -> withTransaction db $
-          insertNowPlaying db username t
-        return (status200, "OK\n")
-      else return $ if wantsHandshake then
-        let user = fromJustNote "username" $ queryGetText urlQuery "u" in
-        (status200, handshakeResponse baseURL user)
-      else
-        (status404, "Not Found\n")
+  let q = parseQuery $ LB.toStrict body
+      sessionID = fromJustNote "session id" $ queryGetText q "s"
+      username = sessionID
+
+  (st, msg) <-
+    if path == submissionsPath then do
+      withDB $ \db -> withTransaction db $
+        mapM_ (insertScrobble db username) . catMaybes . takeWhile isJust $
+          map (\idx -> lookupScrobble (<> "[" <> B.pack (show idx) <> "]") q)
+          [(0 :: Int)..]
+      return (status200, "OK\n")
+    else if path == nowPlayingPath then do
+      let t = fromJustNote "read track" $ lookupTrack id q
+      withDB $ \db -> withTransaction db $
+        insertNowPlaying db username t
+      return (status200, "OK\n")
+    else return $ if wantsHandshake then
+      let user = fromJustNote "username" $ queryGetText urlQuery "u" in
+      (status200, handshakeResponse baseURL user)
+    else
+      (status404, "Not Found\n")
+
+  logger req st (Just . fromIntegral $ LB.length msg)
+  respond $ responseLBS st [] msg
 
 -- Scrobble type
 
@@ -273,7 +271,8 @@ selectOrInsertValues db t cols' x = do
 openDB :: IO SQL.Connection
 openDB = do
   db <- SQL.open "localscrobble.db"
-  SQL.setTrace db . Just $ \s -> T.putStrLn $ "SQL: " <> s
+  when False $
+    SQL.setTrace db . Just $ \s -> T.putStrLn $ "SQL: " <> s
   SQL.execute_ db "PRAGMA foreign_keys = ON"
   return db
 
