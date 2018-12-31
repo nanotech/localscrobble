@@ -1,3 +1,6 @@
 /dist
+/dist-newstyle
 /.cabal-sandbox
+/.ghc.environment.*
+/.stack-work
 localscrobble.db
