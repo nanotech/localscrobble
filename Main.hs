@@ -34,8 +34,12 @@ main = do
   withDB setupDB
 
   let baseURL = "http://localhost:" <> LB.pack (show port)
+      settings =
+        Warp.setPort port
+        $ Warp.setHost "127.0.0.1"
+        $ Warp.defaultSettings
   withStdoutLogger $ \logger ->
-    Warp.run port (app baseURL logger)
+    Warp.runSettings settings (app baseURL logger)
 
 app :: LB.ByteString -> ApacheLogger -> Application
 app baseURL logger req respond = do
