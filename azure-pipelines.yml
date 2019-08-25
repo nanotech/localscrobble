@@ -1,0 +1,31 @@
+trigger:
+- master
+
+pool:
+  vmImage: 'ubuntu-16.04'
+
+variables:
+  STACK_ROOT: $(Pipeline.Workspace)/.stack
+
+steps:
+- script: |
+    mkdir -p ~/.local/bin
+    curl -L https://get.haskellstack.org/stable/linux-x86_64.tar.gz | tar xz --wildcards --strip-components=1 -C ~/.local/bin '*/stack'
+  displayName: Install Stack
+- task: CacheBeta@0
+  inputs:
+    key: haskell-stack | $(Agent.OS) | localscrobble.cabal | stack.yaml
+    path: $(STACK_ROOT)
+  displayName: Cache Dependencies
+- script: |
+    export PATH=$HOME/.local/bin:$PATH
+    stack --no-terminal --install-ghc build --only-dependencies
+  env:
+    STACK_ROOT: $(STACK_ROOT)
+  displayName: Build Dependencies
+- script: |
+    export PATH=$HOME/.local/bin:$PATH
+    stack build
+  env:
+    STACK_ROOT: $(STACK_ROOT)
+  displayName: Build Package
