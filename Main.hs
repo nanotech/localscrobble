@@ -39,7 +39,8 @@ main = do
       <- getOptions
   withDB dbPath setupDB
 
-  let baseURL = "http://" <> LB.pack host <> ":" <> LB.pack (show port)
+  let formatHost host = if ':' `elem` host then "[" <> host <> "]" else host
+      baseURL = "http://" <> LB.pack (formatHost host) <> ":" <> LB.pack (show port)
       settings =
         Warp.setPort port
         $ Warp.setHost (fromString host)
