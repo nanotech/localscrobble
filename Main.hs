@@ -53,24 +53,26 @@ app dbPath baseURL logger req respond = do
   body <- strictRequestBody req
   let urlQuery = queryString req
       wantsHandshake = ("hs", Just "true") `elem` urlQuery
+      isGET = requestMethod req == methodGet
+      isPOST = requestMethod req == methodPost
 
   let q = parseQuery $ LB.toStrict body
       sessionID = fromJustNote "session id" $ queryGetText q "s"
       username = sessionID
 
   (st, msg) <-
-    if path == submissionsPath then do
+    if isPOST && path == submissionsPath then do
       withDB dbPath $ \db -> withTransaction db $
         mapM_ (insertScrobble db username) . catMaybes . takeWhile isJust $
           map (\idx -> lookupScrobble (<> "[" <> B.pack (show idx) <> "]") q)
           [(0 :: Int)..]
       return (status200, "OK\n")
-    else if path == nowPlayingPath then do
+    else if isPOST && path == nowPlayingPath then do
       let t = fromJustNote "read track" $ lookupTrack id q
       withDB dbPath $ \db -> withTransaction db $
         insertNowPlaying db username t
       return (status200, "OK\n")
-    else return $ if wantsHandshake then
+    else return $ if isGET && wantsHandshake then
       let user = fromJustNote "username" $ queryGetText urlQuery "u" in
       (status200, handshakeResponse baseURL user)
     else
