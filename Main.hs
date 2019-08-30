@@ -2,7 +2,8 @@
 module Main (main) where
 
 import Control.Applicative
-import Control.Monad (join, void, when)
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, readMVar)
+import Control.Monad (guard, join, void, when)
 import Control.Exception (bracket, bracketOnError)
 import Safe
 
@@ -11,10 +12,14 @@ import Network.Wai
 import Network.Wai.Logger (ApacheLogger, withStdoutLogger)
 import Network.HTTP.Types
 
+import qualified Crypto.Hash.MD5 as MD5
+import System.Entropy (getEntropy)
+
 import Data.Monoid ((<>))
 import qualified Data.Traversable as Tr
-import Data.Maybe (isJust, catMaybes, listToMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, listToMaybe)
 import Data.Int (Int64)
+import Data.List (find)
 import Data.String (IsString, fromString)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -22,6 +27,7 @@ import qualified Data.Text.IO as T
 import qualified Data.Text.Encoding as T
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as LB
+import qualified Data.ByteString.Base16 as B16
 
 import Data.Time.Clock.POSIX
 
@@ -35,8 +41,12 @@ main = do
   Options
     { optionsHost = host
     , optionsPort = port
-    , optionsDatabasePath = dbPath }
-      <- getOptions
+    , optionsAccountsPath = accountsPath
+    , optionsDatabasePath = dbPath
+    } <- getOptions
+
+  accounts <- parseAccounts <$> T.readFile accountsPath
+  sessions <- newMVar []
   withDB dbPath setupDB
 
   let formatHost host = if ':' `elem` host then "[" <> host <> "]" else host
@@ -46,10 +56,10 @@ main = do
         $ Warp.setHost (fromString host)
         $ Warp.defaultSettings
   withStdoutLogger $ \logger ->
-    Warp.runSettings settings (app dbPath baseURL logger)
+    Warp.runSettings settings (app dbPath baseURL logger accounts sessions)
 
-app :: FilePath -> LB.ByteString -> ApacheLogger -> Application
-app dbPath baseURL logger req respond = do
+app :: FilePath -> LB.ByteString -> ApacheLogger -> Accounts -> MVar Sessions -> Application
+app dbPath baseURL logger accounts sessions req respond = do
   let path = rawPathInfo req
   body <- strictRequestBody req
   let urlQuery = queryString req
@@ -57,30 +67,128 @@ app dbPath baseURL logger req respond = do
       isGET = requestMethod req == methodGet
       isPOST = requestMethod req == methodPost
 
-  let q = parseQuery $ LB.toStrict body
-      sessionID = fromJustNote "session id" $ queryGetText q "s"
-      username = sessionID
+      q = parseQuery $ LB.toStrict body
+      mSessionID = queryGet q "s"
 
-  (st, msg) <-
-    if isPOST && path == submissionsPath then do
+      ok = (status200, "OK\n")
+      missingParameters = (status400, "FAILED Missing Parameters")
+      failAuth reason = (status403, LB.pack (show reason) <> "\n")
+
+  mAuthenticatedUser <- case mSessionID of
+    Just sessionID | isPOST && not wantsHandshake ->
+      findSessionUser sessions sessionID
+    Nothing -> pure Nothing
+
+  (st, msg) <- case mAuthenticatedUser of
+    Just username | isPOST && path == submissionsPath -> do
       withDB dbPath $ \db -> withTransaction db $
         mapM_ (insertScrobble db username) . catMaybes . takeWhile isJust $
           map (\idx -> lookupScrobble (<> "[" <> B.pack (show idx) <> "]") q)
           [(0 :: Int)..]
-      return (status200, "OK\n")
-    else if isPOST && path == nowPlayingPath then do
+      pure ok
+    Just username | isPOST && path == nowPlayingPath -> do
       let t = fromJustNote "read track" $ lookupTrack id q
       withDB dbPath $ \db -> withTransaction db $
         insertNowPlaying db username t
-      return (status200, "OK\n")
-    else return $ if isGET && wantsHandshake then
-      let user = fromJustNote "username" $ queryGetText urlQuery "u" in
-      (status200, handshakeResponse baseURL user)
-    else
-      (status404, "Not Found\n")
+      pure ok
+    Nothing | isPOST -> pure $ failAuth BADAUTH
+    Nothing | isGET && wantsHandshake -> do
+      let user = fromJustNote "username" $ queryGetText urlQuery "u"
+      case queryHandshake urlQuery of
+        Nothing -> pure missingParameters
+        Just handshake -> do
+          mSessionID <- login accounts sessions handshake
+          pure $ case mSessionID of
+            Right sessionID -> (status200, handshakeResponse baseURL sessionID)
+            Left err -> failAuth err
+    _ ->
+      pure (status404, "Not Found\n")
 
   logger req st (Just . fromIntegral $ LB.length msg)
   respond $ responseLBS st [] msg
+
+-- Authentication
+
+type Accounts = [(Username, B.ByteString)]
+
+parseAccounts :: Text -> Accounts
+parseAccounts = map parseLine . T.lines
+  where parseLine line = let (u, p) = T.breakOn ":" line
+                         in (u, T.encodeUtf8 (T.tail p))
+
+type SessionID = B.ByteString
+type Sessions = [(SessionID, Username)]
+
+getSession :: MVar Sessions -> Username -> IO SessionID
+getSession sv user = do
+  modifyMVar sv $ \sessions ->
+    case find ((== user) . snd) sessions of
+      Just (sessionID, _) -> pure (sessions, sessionID)
+      Nothing -> do
+        sessionID <- B16.encode <$> getEntropy 16
+        pure ((sessionID, user) : sessions, sessionID)
+
+findSessionUser :: MVar Sessions -> SessionID -> IO (Maybe Username)
+findSessionUser sv sessionID =
+  fmap snd . find ((== sessionID) . fst) <$> readMVar sv
+
+data LoginError = BADAUTH | BADTIME
+  deriving (Show)
+
+data Handshake = Handshake
+  { hsUser :: Text
+  , hsToken :: B.ByteString
+  , hsTimestamp :: Int64
+  , hsTimestampString :: B.ByteString
+  }
+
+queryHandshake :: Query -> Maybe Handshake
+queryHandshake q = do
+  guard $ ("hs", Just "true") `elem` q
+  u <- queryGetText q "u"
+  a <- queryGet q "a"
+  ts <- queryGet q "t"
+  ti <- readMay $ B.unpack ts
+
+  pure Handshake
+    { hsUser = u
+    , hsToken = a
+    , hsTimestampString = ts
+    , hsTimestamp = ti
+    }
+
+checkTime :: Handshake -> IO Bool
+checkTime hs = do
+  currentTime <- getPOSIXTime
+  let maxClockDifference = 10
+      timestamp = hsTimestamp hs
+      currentSeconds :: Int64
+      currentSeconds = round currentTime
+  pure $ abs (timestamp - currentSeconds) < maxClockDifference
+
+checkToken :: Accounts -> Handshake -> Maybe Username
+checkToken accounts hs = do
+  let user = hsUser hs
+  password <- lookup user accounts
+  let expectedToken = md5 (md5 password <> hsTimestampString hs)
+  if expectedToken == hsToken hs then Just user else Nothing
+
+-- | MD5 with output in lowercase hexadecimal as specified in the
+-- scrobbling submission protocol.
+md5 :: B.ByteString -> B.ByteString
+md5 = B16.encode . MD5.hash
+
+note :: a -> Maybe b -> Either a b
+note x Nothing = Left x
+note _ (Just x) = Right x
+
+login :: Accounts -> MVar Sessions -> Handshake -> IO (Either LoginError SessionID)
+login accounts sessions hs = do
+  timeOk <- checkTime hs
+  if timeOk then
+    sequence . note BADAUTH $ getSession sessions <$> checkToken accounts hs
+  else
+    pure $ Left BADTIME
 
 -- Scrobble type
 
@@ -126,7 +234,7 @@ queryGet :: Query -> B.ByteString -> Maybe B.ByteString
 queryGet q x = nonempty =<< join (lookup x q)
 
 queryGetRead :: Read a => Query -> B.ByteString -> Maybe a
-queryGetRead q x = readNote ("queryGetRead: " <> B.unpack x) . B.unpack <$> queryGet q x
+queryGetRead q x = readMay . B.unpack =<< queryGet q x
 
 queryGetText :: Query -> B.ByteString -> Maybe Text
 queryGetText q x = T.decodeUtf8 <$> queryGet q x
@@ -204,10 +312,10 @@ nowPlayingPath = "/nowplaying/"
 submissionsPath :: IsString s => s
 submissionsPath = "/submissions/"
 
-handshakeResponse :: LB.ByteString -> Username -> LB.ByteString
-handshakeResponse baseURL user =
+handshakeResponse :: LB.ByteString -> SessionID -> LB.ByteString
+handshakeResponse baseURL sessionID =
   "OK\n"
-  <> LB.fromStrict (T.encodeUtf8 user)
+  <> LB.fromStrict sessionID
   <> "\n"
   <> baseURL <> nowPlayingPath <> "\n"
   <> baseURL <> submissionsPath <> "\n"

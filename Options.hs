@@ -8,6 +8,7 @@ import Options.Applicative
 data Options = Options
   { optionsHost :: String
   , optionsPort :: Int
+  , optionsAccountsPath :: String
   , optionsDatabasePath :: String
   }
 
@@ -24,6 +25,12 @@ optionsParser = Options
       <> metavar "PORT"
       <> help "Port to listen on"
       <> value 7123
+      <> showDefault)
+  <*> option str
+      (long "accounts"
+      <> metavar "PATH"
+      <> help "Account list path"
+      <> value "localscrobble-accounts.txt"
       <> showDefault)
   <*> option str
       (long "database"

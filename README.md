@@ -18,13 +18,20 @@ complete.
 
 ## Usage
 
-    ./localscrobble
+    localscrobble [--host HOST] [--port PORT] [--database PATH] [--accounts PATH]
 
-will run an HTTP scrobbling server on `127.0.0.1:7123`. No
-options are available.
+    Available options:
+      --host HOST              Host to listen on (default: "127.0.0.1")
+      --port PORT              Port to listen on (default: 7123)
+      --database PATH          Database path (default: "localscrobble.db")
+      --accounts PATH          Account list path (default: "localscrobble-accounts.txt")
+      -h,--help                Show this help text
 
-As this server is only intended for local use, authentication is
-ignored.
+The accounts file is a list of allowed username and password
+pairs in this format:
+
+    user1:password1
+    user2:password2
 
 If your scrobbling client supports submitting to an alternate
 server, set it to submit to `http://127.0.0.1:7123/`. If it
