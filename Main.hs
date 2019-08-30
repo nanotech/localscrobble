@@ -28,21 +28,27 @@ import Data.Time.Clock.POSIX
 import qualified Database.SQLite.Simple as SQL
 import qualified Database.SQLite3 as RawSQL
 
+import Options (Options (..), getOptions)
+
 main :: IO ()
 main = do
-  let port = 7123
-  withDB setupDB
+  Options
+    { optionsHost = host
+    , optionsPort = port
+    , optionsDatabasePath = dbPath }
+      <- getOptions
+  withDB dbPath setupDB
 
-  let baseURL = "http://localhost:" <> LB.pack (show port)
+  let baseURL = "http://" <> LB.pack host <> ":" <> LB.pack (show port)
       settings =
         Warp.setPort port
-        $ Warp.setHost "127.0.0.1"
+        $ Warp.setHost (fromString host)
         $ Warp.defaultSettings
   withStdoutLogger $ \logger ->
-    Warp.runSettings settings (app baseURL logger)
+    Warp.runSettings settings (app dbPath baseURL logger)
 
-app :: LB.ByteString -> ApacheLogger -> Application
-app baseURL logger req respond = do
+app :: FilePath -> LB.ByteString -> ApacheLogger -> Application
+app dbPath baseURL logger req respond = do
   let path = rawPathInfo req
   body <- strictRequestBody req
   let urlQuery = queryString req
@@ -54,14 +60,14 @@ app baseURL logger req respond = do
 
   (st, msg) <-
     if path == submissionsPath then do
-      withDB $ \db -> withTransaction db $
+      withDB dbPath $ \db -> withTransaction db $
         mapM_ (insertScrobble db username) . catMaybes . takeWhile isJust $
           map (\idx -> lookupScrobble (<> "[" <> B.pack (show idx) <> "]") q)
           [(0 :: Int)..]
       return (status200, "OK\n")
     else if path == nowPlayingPath then do
       let t = fromJustNote "read track" $ lookupTrack id q
-      withDB $ \db -> withTransaction db $
+      withDB dbPath $ \db -> withTransaction db $
         insertNowPlaying db username t
       return (status200, "OK\n")
     else return $ if wantsHandshake then
@@ -272,16 +278,16 @@ selectOrInsertValues db t cols' x = do
     Nothing -> insertValues db t cols' x
     Just i -> return i
 
-openDB :: IO SQL.Connection
-openDB = do
-  db <- SQL.open "localscrobble.db"
+openDB :: FilePath -> IO SQL.Connection
+openDB path = do
+  db <- SQL.open path
   when False $
     SQL.setTrace db . Just $ \s -> T.putStrLn $ "SQL: " <> s
   SQL.execute_ db "PRAGMA foreign_keys = ON"
   return db
 
-withDB :: (SQL.Connection -> IO a) -> IO a
-withDB = bracket openDB SQL.close
+withDB :: FilePath -> (SQL.Connection -> IO a) -> IO a
+withDB dbPath = bracket (openDB dbPath) SQL.close
 
 setupDB :: SQL.Connection -> IO ()
 setupDB db = RawSQL.exec (SQL.connectionHandle db) schema
